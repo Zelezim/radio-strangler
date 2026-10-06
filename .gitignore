@@ -1,0 +1,12 @@
+# Local secrets: only .env.example is versioned.
+.env
+
+# Build and test artifacts
+/bin/
+*.test
+*.out
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
