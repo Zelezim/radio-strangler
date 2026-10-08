@@ -204,6 +204,125 @@ func (s *Store) RecordComparison(ctx context.Context, r shadow.Result) error {
 	return nil
 }
 
+// UpsertRule creates or replaces the rule for r.Route and returns the stored rule together with
+// the mode it had before ("" if it is new), so callers can log the transition.
+//
+// A nil r.IgnoreFields means "keep the current value": switching a route's mode must not
+// silently drop the fields it was told to ignore. The column still never becomes NULL.
+func (s *Store) UpsertRule(ctx context.Context, r routing.Rule) (routing.Rule, string, error) {
+	var (
+		out      routing.Rule
+		mode     string
+		ignore   pq.StringArray
+		previous sql.NullString
+	)
+	err := s.db.QueryRowContext(ctx, `
+		WITH prev AS (SELECT mode FROM route_rules WHERE route = $1)
+		INSERT INTO route_rules (route, mode, canary_percent, ignore_fields, updated_at)
+		VALUES ($1, $2, $3, COALESCE($4::text[], '{}'), now())
+		ON CONFLICT (route) DO UPDATE SET
+		       mode           = EXCLUDED.mode,
+		       canary_percent = EXCLUDED.canary_percent,
+		       ignore_fields  = COALESCE($4::text[], route_rules.ignore_fields),
+		       updated_at     = now()
+		RETURNING route, mode, canary_percent, ignore_fields, updated_at, (SELECT mode FROM prev)`,
+		r.Route, string(r.Mode), r.CanaryPercent, nullableArray(r.IgnoreFields),
+	).Scan(&out.Route, &mode, &out.CanaryPercent, &ignore, &out.UpdatedAt, &previous)
+	if err != nil {
+		return routing.Rule{}, "", fmt.Errorf("upsert route_rules: %w", err)
+	}
+	out.Mode = routing.Mode(mode)
+	out.IgnoreFields = []string(ignore)
+	return out, previous.String, nil
+}
+
+// nullableArray maps a nil slice to SQL NULL and anything else (including empty) to an array.
+func nullableArray(v []string) any {
+	if v == nil {
+		return nil
+	}
+	return pq.Array(v)
+}
+
+// ListComparisons returns the most recent comparisons matching f, newest first.
+func (s *Store) ListComparisons(ctx context.Context, f shadow.Filter) ([]shadow.Result, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, route, method, path, legacy_status, go_status, match, diffs,
+		       legacy_ms, go_ms, error, created_at
+		  FROM shadow_comparisons
+		 WHERE ($1 = '' OR route = $1)
+		   AND (NOT $2 OR NOT match)
+		 ORDER BY id DESC
+		 LIMIT $3`,
+		f.Route, f.MismatchesOnly, f.Limit)
+	if err != nil {
+		return nil, fmt.Errorf("query shadow_comparisons: %w", err)
+	}
+	defer rows.Close()
+
+	results := []shadow.Result{}
+	for rows.Next() {
+		var (
+			r     shadow.Result
+			diffs pq.StringArray
+		)
+		if err := rows.Scan(&r.ID, &r.Route, &r.Method, &r.Path, &r.LegacyStatus, &r.GoStatus, &r.Match,
+			&diffs, &r.LegacyMS, &r.GoMS, &r.Error, &r.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan shadow_comparisons: %w", err)
+		}
+		r.Diffs = []string(diffs)
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
+// ShadowStats aggregates the comparisons of the last window per route.
+func (s *Store) ShadowStats(ctx context.Context, window time.Duration) ([]shadow.RouteStats, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT route,
+		       count(*),
+		       count(*) FILTER (WHERE match),
+		       count(*) FILTER (WHERE error <> ''),
+		       percentile_cont(0.95) WITHIN GROUP (ORDER BY legacy_ms),
+		       percentile_cont(0.95) WITHIN GROUP (ORDER BY go_ms),
+		       max(created_at)
+		  FROM shadow_comparisons
+		 WHERE created_at > now() - make_interval(secs => $1)
+		 GROUP BY route
+		 ORDER BY route`,
+		window.Seconds())
+	if err != nil {
+		return nil, fmt.Errorf("query shadow stats: %w", err)
+	}
+	defer rows.Close()
+
+	stats := []shadow.RouteStats{}
+	for rows.Next() {
+		var st shadow.RouteStats
+		if err := rows.Scan(&st.Route, &st.Total, &st.Matched, &st.Errors,
+			&st.LegacyP95, &st.GoP95, &st.LastSeen); err != nil {
+			return nil, fmt.Errorf("scan shadow stats: %w", err)
+		}
+		if st.Total > 0 {
+			st.MatchRate = float64(st.Matched) / float64(st.Total)
+		}
+		stats = append(stats, st)
+	}
+	return stats, rows.Err()
+}
+
+// PurgeComparisons deletes comparisons older than olderThan and returns how many were removed.
+// It is idempotent, so several replicas running it concurrently is harmless.
+func (s *Store) PurgeComparisons(ctx context.Context, olderThan time.Duration) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM shadow_comparisons WHERE created_at < now() - make_interval(secs => $1)`,
+		olderThan.Seconds())
+	if err != nil {
+		return 0, fmt.Errorf("purge shadow_comparisons: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 // Migrate applies pending embedded migrations in filename order, each in its own transaction.
 func (s *Store) Migrate(ctx context.Context, log *slog.Logger) error {
 	// Advisory locks belong to the session, so lock, migrate and unlock must share one connection.

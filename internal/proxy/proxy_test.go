@@ -38,7 +38,7 @@ func TestProxyForwardsToLegacy(t *testing.T) {
 	candidate := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Error("candidate must not be called for legacy-served routes")
 	})
-	h := httpx.Chain(New(table, NewLegacy(target, 5*time.Second, log), candidate, nil, log), httpx.RequestID)
+	h := httpx.Chain(New(table, NewLegacy(target, 5*time.Second, log), candidate, nil, nil, log), httpx.RequestID)
 
 	tests := []struct {
 		path     string
@@ -91,7 +91,7 @@ func TestProxyServesGoRoutesFromCandidate(t *testing.T) {
 	table.Replace([]routing.Rule{{Route: "/api/programs", Mode: routing.ModeGo}})
 
 	rec := httptest.NewRecorder()
-	New(table, legacy, candidate, nil, quietLogger()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/programs", nil))
+	New(table, legacy, candidate, nil, nil, quietLogger()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/programs", nil))
 
 	if body := strings.TrimSpace(rec.Body.String()); body != `{"from":"go"}` {
 		t.Errorf("body = %s", body)
@@ -110,7 +110,7 @@ func TestCanarySplitsByClient(t *testing.T) {
 	}
 	table := routing.NewTable()
 	table.Replace([]routing.Rule{{Route: "/api/tracks", Mode: routing.ModeCanary, CanaryPercent: 50}})
-	p := New(table, served("legacy"), served("go"), nil, quietLogger())
+	p := New(table, served("legacy"), served("go"), nil, nil, quietLogger())
 
 	counts := map[string]int{}
 	for i := 0; i < 200; i++ {
@@ -128,13 +128,37 @@ func TestCanarySplitsByClient(t *testing.T) {
 	}
 }
 
+type recordingObserver struct{ got []string }
+
+func (o *recordingObserver) ObserveRequest(route, backend string, status int, _ time.Duration) {
+	o.got = append(o.got, route+" "+backend+" "+strconv.Itoa(status))
+}
+
+func TestObserverUsesRuleRouteNotRawPath(t *testing.T) {
+	respond := func(status int) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) })
+	}
+	table := routing.NewTable()
+	table.Replace([]routing.Rule{{Route: "/api/tracks", Mode: routing.ModeGo}})
+	obs := &recordingObserver{}
+	p := New(table, respond(http.StatusNotFound), respond(http.StatusOK), nil, obs, quietLogger())
+
+	for _, path := range []string{"/api/tracks/42", "/api/tracks/43", "/wp-login.php"} {
+		p.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+	}
+	want := "/api/tracks go 200|/api/tracks go 200|unmatched legacy 404"
+	if got := strings.Join(obs.got, "|"); got != want {
+		t.Errorf("observed %q, want %q", got, want)
+	}
+}
+
 func TestLegacyDownReturns502(t *testing.T) {
 	legacy := httptest.NewServer(http.NotFoundHandler())
 	target, _ := url.Parse(legacy.URL)
 	legacy.Close() // nothing listens on target any more
 
 	log := quietLogger()
-	h := New(routing.NewTable(), NewLegacy(target, time.Second, log), http.NotFoundHandler(), nil, log)
+	h := New(routing.NewTable(), NewLegacy(target, time.Second, log), http.NotFoundHandler(), nil, nil, log)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/tracks", nil))
 

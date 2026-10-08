@@ -36,24 +36,51 @@ type ShadowSubmitter interface {
 	Submit(job shadow.Job) bool
 }
 
+// RequestObserver is told about every proxied request (metrics hook).
+type RequestObserver interface {
+	ObserveRequest(route, backend string, status int, d time.Duration)
+}
+
+// UnmatchedRoute is the route label for requests that matched no rule.
+const UnmatchedRoute = "unmatched"
+
 // Proxy routes each request to the legacy or the Go implementation.
 type Proxy struct {
 	rules     RuleMatcher
 	legacy    http.Handler
 	candidate http.Handler
 	shadow    ShadowSubmitter
+	obs       RequestObserver
 	log       *slog.Logger
 }
 
 // New builds the facade. legacy is usually the handler returned by NewLegacy; candidate is the
-// in-process Go API that is replacing it; sh receives the comparisons (nil disables them).
-func New(rules RuleMatcher, legacy, candidate http.Handler, sh ShadowSubmitter, log *slog.Logger) *Proxy {
-	return &Proxy{rules: rules, legacy: legacy, candidate: candidate, shadow: sh, log: log}
+// in-process Go API that is replacing it; sh receives the comparisons and obs the per-request
+// measurements (either may be nil).
+func New(rules RuleMatcher, legacy, candidate http.Handler, sh ShadowSubmitter, obs RequestObserver, log *slog.Logger) *Proxy {
+	return &Proxy{rules: rules, legacy: legacy, candidate: candidate, shadow: sh, obs: obs, log: log}
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rule := p.rules.Match(r.URL.Path)
 	backend := rule.Backend(ClientKey(r))
+
+	if p.obs != nil {
+		start := time.Now()
+		sw := &httpx.StatusWriter{ResponseWriter: w}
+		w = sw
+		defer func() {
+			status := sw.Status
+			if status == 0 {
+				status = http.StatusOK
+			}
+			route := rule.Route
+			if route == "" {
+				route = UnmatchedRoute
+			}
+			p.obs.ObserveRequest(route, string(backend), status, time.Since(start))
+		}()
+	}
 
 	w.Header().Set(httpx.ServedByHeader, string(backend))
 	w.Header().Set(RouteModeHeader, string(rule.Mode))

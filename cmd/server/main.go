@@ -13,9 +13,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Zelezim/radio-strangler/internal/admin"
 	"github.com/Zelezim/radio-strangler/internal/api"
 	"github.com/Zelezim/radio-strangler/internal/config"
 	"github.com/Zelezim/radio-strangler/internal/httpx"
+	"github.com/Zelezim/radio-strangler/internal/metrics"
 	"github.com/Zelezim/radio-strangler/internal/proxy"
 	"github.com/Zelezim/radio-strangler/internal/routing"
 	"github.com/Zelezim/radio-strangler/internal/shadow"
@@ -85,12 +87,18 @@ func run(cfg config.Config, log *slog.Logger) error {
 	}
 	goAPI := api.New(st, cfg.DemoInjectBugs, log)
 
-	shadows := shadow.NewRunner(goAPI, st, logObserver{log: log}, cfg.ShadowTimeout, log)
+	registry := metrics.NewRegistry()
+
+	shadows := shadow.NewRunner(goAPI, st, registry, cfg.ShadowTimeout, log)
 	shadows.Start(cfg.ShadowWorkers, cfg.ShadowQueue)
 
-	facade := proxy.New(table, proxy.NewLegacy(legacyURL, cfg.LegacyTimeout, log), goAPI, shadows, log)
+	facade := proxy.New(table, proxy.NewLegacy(legacyURL, cfg.LegacyTimeout, log), goAPI, shadows, registry, log)
+
+	go runRetention(ctx, st, cfg.ShadowRetention, log)
 
 	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", registry)
+	mux.Handle("/admin/", admin.New(st, loader, cfg.AdminToken, log))
 	// Liveness: the process is up. Deliberately independent of the database so a database
 	// outage does not make the platform restart a healthy proxy in a loop.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -158,15 +166,37 @@ func run(cfg config.Config, log *slog.Logger) error {
 	return nil
 }
 
-// logObserver is a placeholder Observer until metrics exist: drops matter operationally (the
-// queue is too small or Go too slow), the other outcomes are already logged by the runner.
-type logObserver struct {
-	log *slog.Logger
-}
+// retentionInterval is how often old shadow comparisons are purged. Hourly keeps the table near
+// its retention size without the purge itself becoming noticeable load.
+const retentionInterval = time.Hour
 
-func (o logObserver) ObserveShadow(route, outcome string) {
-	if outcome == shadow.OutcomeDropped {
-		o.log.Warn("shadow job dropped: queue full", "route", route)
+// runRetention deletes shadow comparisons older than retention, at startup and then hourly.
+// Every replica runs it; the DELETE is idempotent, so no leader election is needed.
+func runRetention(ctx context.Context, st *store.Store, retention time.Duration, log *slog.Logger) {
+	purge := func() {
+		purgeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		n, err := st.PurgeComparisons(purgeCtx, retention)
+		if err != nil {
+			// Shutting down is not a failure worth a warning; a slow or broken database is.
+			if ctx.Err() == nil {
+				log.Warn("shadow retention purge failed", "err", err)
+			}
+			return
+		}
+		log.Info("shadow retention purge", "deleted", n, "older_than", retention.String())
+	}
+
+	purge()
+	ticker := time.NewTicker(retentionInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			purge()
+		}
 	}
 }
 

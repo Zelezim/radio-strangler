@@ -59,7 +59,7 @@ func newShadowEnv(t *testing.T, rules []routing.Rule, legacyBody string, candida
 
 	table := routing.NewTable()
 	table.Replace(rules)
-	env.handler = httpx.Chain(New(table, NewLegacy(target, 5*time.Second, log), countingCandidate, env.runner, log), httpx.RequestID)
+	env.handler = httpx.Chain(New(table, NewLegacy(target, 5*time.Second, log), countingCandidate, env.runner, nil, log), httpx.RequestID)
 	return env
 }
 

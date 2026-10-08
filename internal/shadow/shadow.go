@@ -47,6 +47,7 @@ type Job struct {
 
 // Result is the outcome of one comparison.
 type Result struct {
+	ID           int64     `json:"id,omitempty"` // set when read back from storage
 	Route        string    `json:"route"`
 	Method       string    `json:"method"`
 	Path         string    `json:"path"`

@@ -38,11 +38,11 @@ const (
 
 // Rule is the routing configuration of one route prefix.
 type Rule struct {
-	Route         string
-	Mode          Mode
-	CanaryPercent int
-	IgnoreFields  []string
-	UpdatedAt     time.Time
+	Route         string    `json:"route"`
+	Mode          Mode      `json:"mode"`
+	CanaryPercent int       `json:"canary_percent"`
+	IgnoreFields  []string  `json:"ignore_fields"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // DefaultRule applies to any path without a rule. Unknown traffic always goes to the legacy
