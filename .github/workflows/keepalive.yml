@@ -1,0 +1,32 @@
+name: Keepalive
+
+# Free tiers go idle: Supabase pauses a project after 7 days without activity, and Render spins a
+# web service down after 15 minutes. One GET on /readyz every 3 days handles both: it wakes the
+# Render service, and /readyz runs a real query (SELECT on route_rules), which counts as database
+# activity for Supabase. A failure here is also an early warning that the demo is broken.
+
+on:
+  schedule:
+    # Off the hour on purpose: scheduled runs at :00 are the most delayed under load.
+    - cron: "17 9 */3 * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  ping:
+    # Forks and clones without a deployment have nothing to ping.
+    if: ${{ vars.APP_URL != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Wake the app and touch the database
+        # The URL goes through env, never interpolated into the script: ${{ }} is substituted
+        # before the shell runs, so a crafted value could inject commands.
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+        # Retries cover the ~1 min Render cold start.
+        run: |
+          curl --fail --silent --show-error \
+            --retry 5 --retry-delay 20 --retry-all-errors --max-time 90 \
+            "$APP_URL/readyz"

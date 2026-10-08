@@ -110,8 +110,8 @@ step "2. /api/programs is served by legacy"
 fetch /api/programs "$tmp/programs"
 served="$(header "$tmp/programs.headers" X-Served-By)"
 [[ "$served" == legacy ]] || fail "/api/programs served by '$served', expected legacy"
-jq -S . "$tmp/programs.body" >"$tmp/programs.legacy.json" || fail "/api/programs did not return JSON"
-echo "  $(jq '.data | length' "$tmp/programs.body") programs"
+jq -S . <"$tmp/programs.body" >"$tmp/programs.legacy.json" || fail "/api/programs did not return JSON"
+echo "  $(jq '.data | length' <"$tmp/programs.body") programs"
 
 # Results are assigned before use: with set -e, a failing $(...) aborts an assignment but would be
 # silently ignored if passed straight as an argument.
@@ -138,7 +138,7 @@ programs_changed=true
 admin -X PUT -d '{"mode":"go"}' "$BASE_URL/admin/routes/api/programs" | jq -e '.data.mode == "go"' >/dev/null ||
 	fail "PUT /admin/routes/api/programs to go failed"
 wait_for_backend /api/programs go
-jq -S . "$tmp/poll.body" >"$tmp/programs.go.json"
+jq -S . <"$tmp/poll.body" >"$tmp/programs.go.json"
 if ! diff -u "$tmp/programs.legacy.json" "$tmp/programs.go.json"; then
 	fail "Go response for /api/programs differs from legacy"
 fi
