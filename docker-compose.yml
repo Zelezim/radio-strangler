@@ -1,0 +1,61 @@
+# The "on-prem" environment: everything runs locally, including Postgres. It never talks to
+# Supabase. The same two images are deployed to Render (see render.yaml).
+#
+# Note: docker compose reads ./.env for ${VAR} substitution, so ADMIN_TOKEN, DEMO_INJECT_BUGS and
+# LOG_LEVEL from your .env apply here too. DATABASE_URL is set explicitly below on purpose.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: radio
+      POSTGRES_PASSWORD: radio # local-only demo credential
+      POSTGRES_DB: radio
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U radio -d radio"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  legacy:
+    build: ./legacy-php
+    environment:
+      PORT: "8081"
+      DATABASE_URL: postgres://radio:radio@db:5432/radio?sslmode=disable
+    ports:
+      - "${LEGACY_PORT:-8081}:8081"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # busybox wget ships with the alpine base. 127.0.0.1, not localhost: localhost resolves to
+      # ::1 first, and php -S 0.0.0.0 only listens on IPv4.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgres://radio:radio@db:5432/radio?sslmode=disable
+      LEGACY_URL: http://legacy:8081
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-dev-admin-token}
+      DEMO_INJECT_BUGS: ${DEMO_INJECT_BUGS:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+      legacy:
+        condition: service_healthy
+    # The server drains for up to 20s on SIGTERM; Docker's default 10s would SIGKILL it mid-drain.
+    stop_grace_period: 25s
+    restart: unless-stopped
+
+volumes:
+  db-data:
