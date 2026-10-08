@@ -14,7 +14,9 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
+
+	"github.com/Zelezim/radio-strangler/internal/routing"
 )
 
 //go:embed migrations/*.sql
@@ -62,6 +64,32 @@ func (s *Store) Close() error {
 func (s *Store) Ping(ctx context.Context) error {
 	var n int
 	return s.db.QueryRowContext(ctx, `SELECT count(*) FROM route_rules`).Scan(&n)
+}
+
+// ListRules returns every persisted route rule. It satisfies routing.Source.
+func (s *Store) ListRules(ctx context.Context) ([]routing.Rule, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT route, mode, canary_percent, ignore_fields, updated_at FROM route_rules`)
+	if err != nil {
+		return nil, fmt.Errorf("query route_rules: %w", err)
+	}
+	defer rows.Close()
+
+	var rules []routing.Rule
+	for rows.Next() {
+		var (
+			r      routing.Rule
+			mode   string
+			ignore pq.StringArray
+		)
+		if err := rows.Scan(&r.Route, &mode, &r.CanaryPercent, &ignore, &r.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan route_rules: %w", err)
+		}
+		r.Mode = routing.Mode(mode)
+		r.IgnoreFields = []string(ignore)
+		rules = append(rules, r)
+	}
+	return rules, rows.Err()
 }
 
 // Migrate applies pending embedded migrations in filename order, each in its own transaction.
