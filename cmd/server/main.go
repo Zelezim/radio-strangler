@@ -18,6 +18,7 @@ import (
 	"github.com/Zelezim/radio-strangler/internal/httpx"
 	"github.com/Zelezim/radio-strangler/internal/proxy"
 	"github.com/Zelezim/radio-strangler/internal/routing"
+	"github.com/Zelezim/radio-strangler/internal/shadow"
 	"github.com/Zelezim/radio-strangler/internal/store"
 )
 
@@ -83,7 +84,11 @@ func run(cfg config.Config, log *slog.Logger) error {
 		log.Warn("DEMO_INJECT_BUGS is on: the Go API deliberately returns null instead of [] for empty tags; never enable in production")
 	}
 	goAPI := api.New(st, cfg.DemoInjectBugs, log)
-	facade := proxy.New(table, proxy.NewLegacy(legacyURL, cfg.LegacyTimeout, log), goAPI, log)
+
+	shadows := shadow.NewRunner(goAPI, st, logObserver{log: log}, cfg.ShadowTimeout, log)
+	shadows.Start(cfg.ShadowWorkers, cfg.ShadowQueue)
+
+	facade := proxy.New(table, proxy.NewLegacy(legacyURL, cfg.LegacyTimeout, log), goAPI, shadows, log)
 
 	mux := http.NewServeMux()
 	// Liveness: the process is up. Deliberately independent of the database so a database
@@ -137,11 +142,32 @@ func run(cfg config.Config, log *slog.Logger) error {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
+	// Order matters: in-flight requests can still submit shadow jobs until the server has
+	// drained, so the runner is closed only afterwards, within the same overall deadline.
+	var errs []error
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("shutdown: %w", err)
+		errs = append(errs, fmt.Errorf("http shutdown: %w", err))
+	}
+	if err := shadows.Close(shutdownCtx); err != nil {
+		errs = append(errs, err)
+	}
+	if err := errors.Join(errs...); err != nil {
+		return err
 	}
 	log.Info("shutdown complete")
 	return nil
+}
+
+// logObserver is a placeholder Observer until metrics exist: drops matter operationally (the
+// queue is too small or Go too slow), the other outcomes are already logged by the runner.
+type logObserver struct {
+	log *slog.Logger
+}
+
+func (o logObserver) ObserveShadow(route, outcome string) {
+	if outcome == shadow.OutcomeDropped {
+		o.log.Warn("shadow job dropped: queue full", "route", route)
+	}
 }
 
 func logRules(log *slog.Logger, rules []routing.Rule) {

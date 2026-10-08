@@ -38,7 +38,7 @@ func TestProxyForwardsToLegacy(t *testing.T) {
 	candidate := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Error("candidate must not be called for legacy-served routes")
 	})
-	h := httpx.Chain(New(table, NewLegacy(target, 5*time.Second, log), candidate, log), httpx.RequestID)
+	h := httpx.Chain(New(table, NewLegacy(target, 5*time.Second, log), candidate, nil, log), httpx.RequestID)
 
 	tests := []struct {
 		path     string
@@ -91,7 +91,7 @@ func TestProxyServesGoRoutesFromCandidate(t *testing.T) {
 	table.Replace([]routing.Rule{{Route: "/api/programs", Mode: routing.ModeGo}})
 
 	rec := httptest.NewRecorder()
-	New(table, legacy, candidate, quietLogger()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/programs", nil))
+	New(table, legacy, candidate, nil, quietLogger()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/programs", nil))
 
 	if body := strings.TrimSpace(rec.Body.String()); body != `{"from":"go"}` {
 		t.Errorf("body = %s", body)
@@ -110,7 +110,7 @@ func TestCanarySplitsByClient(t *testing.T) {
 	}
 	table := routing.NewTable()
 	table.Replace([]routing.Rule{{Route: "/api/tracks", Mode: routing.ModeCanary, CanaryPercent: 50}})
-	p := New(table, served("legacy"), served("go"), quietLogger())
+	p := New(table, served("legacy"), served("go"), nil, quietLogger())
 
 	counts := map[string]int{}
 	for i := 0; i < 200; i++ {
@@ -134,7 +134,7 @@ func TestLegacyDownReturns502(t *testing.T) {
 	legacy.Close() // nothing listens on target any more
 
 	log := quietLogger()
-	h := New(routing.NewTable(), NewLegacy(target, time.Second, log), http.NotFoundHandler(), log)
+	h := New(routing.NewTable(), NewLegacy(target, time.Second, log), http.NotFoundHandler(), nil, log)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/tracks", nil))
 

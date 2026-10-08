@@ -3,6 +3,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/Zelezim/radio-strangler/internal/httpx"
 	"github.com/Zelezim/radio-strangler/internal/routing"
+	"github.com/Zelezim/radio-strangler/internal/shadow"
 )
 
 const (
@@ -29,18 +31,24 @@ type RuleMatcher interface {
 	Match(path string) routing.Rule
 }
 
+// ShadowSubmitter accepts comparison jobs without blocking.
+type ShadowSubmitter interface {
+	Submit(job shadow.Job) bool
+}
+
 // Proxy routes each request to the legacy or the Go implementation.
 type Proxy struct {
 	rules     RuleMatcher
 	legacy    http.Handler
 	candidate http.Handler
+	shadow    ShadowSubmitter
 	log       *slog.Logger
 }
 
 // New builds the facade. legacy is usually the handler returned by NewLegacy; candidate is the
-// in-process Go API that is replacing it.
-func New(rules RuleMatcher, legacy, candidate http.Handler, log *slog.Logger) *Proxy {
-	return &Proxy{rules: rules, legacy: legacy, candidate: candidate, log: log}
+// in-process Go API that is replacing it; sh receives the comparisons (nil disables them).
+func New(rules RuleMatcher, legacy, candidate http.Handler, sh ShadowSubmitter, log *slog.Logger) *Proxy {
+	return &Proxy{rules: rules, legacy: legacy, candidate: candidate, shadow: sh, log: log}
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -55,7 +63,94 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.candidate.ServeHTTP(w, r)
 		return
 	}
+	// Only safe methods are replayed: shadowing a POST would execute the write twice, once in
+	// each implementation, against the same database.
+	if rule.Mode == routing.ModeShadow && r.Method == http.MethodGet && p.shadow != nil {
+		p.serveShadow(w, r, rule)
+		return
+	}
 	p.legacy.ServeHTTP(w, r)
+}
+
+// serveShadow answers from legacy and hands a copy of the exchange to the shadow runner.
+func (p *Proxy) serveShadow(w http.ResponseWriter, r *http.Request, rule routing.Rule) {
+	// Cloned before legacy sees the request: the reverse proxy mutates its input. The context
+	// keeps its values (request id) but not its cancellation, because the client disconnecting
+	// right after its response must not cancel the comparison that runs afterwards.
+	replay := r.Clone(context.WithoutCancel(r.Context()))
+	replay.Body = http.NoBody
+
+	cw := &captureWriter{ResponseWriter: w, limit: shadow.MaxBody}
+	start := time.Now()
+	p.legacy.ServeHTTP(cw, r)
+	latency := time.Since(start)
+
+	if cw.truncated {
+		p.log.Debug("shadow skipped: legacy body over limit", "route", rule.Route, "path", r.URL.Path)
+		return
+	}
+	p.shadow.Submit(shadow.Job{
+		Route:         rule.Route,
+		IgnoreFields:  rule.IgnoreFields,
+		Req:           replay,
+		LegacyStatus:  cw.statusCode(),
+		LegacyBody:    cw.buf.Bytes(),
+		LegacyLatency: latency,
+	})
+}
+
+// captureWriter streams the response to the client unchanged while keeping a bounded copy.
+type captureWriter struct {
+	http.ResponseWriter
+	status    int
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func (c *captureWriter) WriteHeader(code int) {
+	if c.status == 0 && code >= 200 {
+		c.status = code
+	}
+	c.ResponseWriter.WriteHeader(code)
+}
+
+func (c *captureWriter) Write(b []byte) (int, error) {
+	if c.status == 0 {
+		c.status = http.StatusOK
+	}
+	if !c.truncated {
+		if c.buf.Len()+len(b) > c.limit {
+			// Too big to compare: stop copying and free what we have; the client is unaffected.
+			c.truncated = true
+			c.buf = bytes.Buffer{}
+		} else {
+			c.buf.Write(b)
+		}
+	}
+	return c.ResponseWriter.Write(b)
+}
+
+// Flush keeps streamed legacy responses streaming through the capture.
+func (c *captureWriter) Flush() {
+	if c.status == 0 {
+		c.status = http.StatusOK
+	}
+	if f, ok := c.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer.
+func (c *captureWriter) Unwrap() http.ResponseWriter {
+	return c.ResponseWriter
+}
+
+func (c *captureWriter) statusCode() int {
+	if c.status == 0 {
+		return http.StatusOK
+	}
+	return c.status
 }
 
 // ClientKey identifies a client for canary bucketing only. Every source here is client-controlled

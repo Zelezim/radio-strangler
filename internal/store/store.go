@@ -19,6 +19,7 @@ import (
 
 	"github.com/Zelezim/radio-strangler/internal/radio"
 	"github.com/Zelezim/radio-strangler/internal/routing"
+	"github.com/Zelezim/radio-strangler/internal/shadow"
 )
 
 //go:embed migrations/*.sql
@@ -178,6 +179,29 @@ func scanTrack(scan func(dest ...any) error) (radio.Track, error) {
 	}
 	t.Tags = []string(tags)
 	return t, nil
+}
+
+// RecordComparison persists one shadow result. It satisfies shadow.Recorder.
+func (s *Store) RecordComparison(ctx context.Context, r shadow.Result) error {
+	// The column is NOT NULL: "no differences" is stored as '{}', never as NULL.
+	diffs := r.Diffs
+	if diffs == nil {
+		diffs = []string{}
+	}
+	createdAt := r.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO shadow_comparisons
+		       (route, method, path, legacy_status, go_status, match, diffs, legacy_ms, go_ms, error, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		r.Route, r.Method, r.Path, r.LegacyStatus, r.GoStatus, r.Match, pq.Array(diffs),
+		r.LegacyMS, r.GoMS, r.Error, createdAt)
+	if err != nil {
+		return fmt.Errorf("insert shadow_comparisons: %w", err)
+	}
+	return nil
 }
 
 // Migrate applies pending embedded migrations in filename order, each in its own transaction.
