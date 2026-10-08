@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Zelezim/radio-strangler/internal/api"
 	"github.com/Zelezim/radio-strangler/internal/config"
 	"github.com/Zelezim/radio-strangler/internal/httpx"
 	"github.com/Zelezim/radio-strangler/internal/proxy"
@@ -78,7 +79,11 @@ func run(cfg config.Config, log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("legacy url: %w", err)
 	}
-	facade := proxy.New(table, proxy.NewLegacy(legacyURL, cfg.LegacyTimeout, log), log)
+	if cfg.DemoInjectBugs {
+		log.Warn("DEMO_INJECT_BUGS is on: the Go API deliberately returns null instead of [] for empty tags; never enable in production")
+	}
+	goAPI := api.New(st, cfg.DemoInjectBugs, log)
+	facade := proxy.New(table, proxy.NewLegacy(legacyURL, cfg.LegacyTimeout, log), goAPI, log)
 
 	mux := http.NewServeMux()
 	// Liveness: the process is up. Deliberately independent of the database so a database

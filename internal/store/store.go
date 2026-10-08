@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/lib/pq"
 
+	"github.com/Zelezim/radio-strangler/internal/radio"
 	"github.com/Zelezim/radio-strangler/internal/routing"
 )
 
@@ -90,6 +92,92 @@ func (s *Store) ListRules(ctx context.Context) ([]routing.Rule, error) {
 		rules = append(rules, r)
 	}
 	return rules, rows.Err()
+}
+
+// ListPrograms returns the schedule with the same SQL formatting and ordering as the legacy API,
+// so both implementations are compared on identical data rather than on formatting code.
+func (s *Store) ListPrograms(ctx context.Context) ([]radio.Program, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT p.id, p.name, p.host, p.weekday,
+		       to_char(p.start_time, 'HH24:MI'),
+		       to_char(p.end_time, 'HH24:MI')
+		  FROM programs p
+		 ORDER BY p.weekday, p.start_time, p.id`)
+	if err != nil {
+		return nil, fmt.Errorf("query programs: %w", err)
+	}
+	defer rows.Close()
+
+	var programs []radio.Program
+	for rows.Next() {
+		var p radio.Program
+		if err := rows.Scan(&p.ID, &p.Name, &p.Host, &p.Weekday, &p.StartTime, &p.EndTime); err != nil {
+			return nil, fmt.Errorf("scan programs: %w", err)
+		}
+		programs = append(programs, p)
+	}
+	return programs, rows.Err()
+}
+
+// ListTracks returns the library ordered by id, like the legacy API.
+func (s *Store) ListTracks(ctx context.Context) ([]radio.Track, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, title, artist, album, duration_seconds, tags
+		  FROM tracks
+		 ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("query tracks: %w", err)
+	}
+	defer rows.Close()
+
+	var tracks []radio.Track
+	for rows.Next() {
+		t, err := scanTrack(rows.Scan)
+		if err != nil {
+			return nil, fmt.Errorf("scan tracks: %w", err)
+		}
+		tracks = append(tracks, t)
+	}
+	return tracks, rows.Err()
+}
+
+// NowPlaying returns the most recent play, or nil when nothing has been played yet.
+func (s *Store) NowPlaying(ctx context.Context) (*radio.Play, error) {
+	var play radio.Play
+	t, err := scanTrack(func(dest ...any) error {
+		return s.db.QueryRowContext(ctx, `
+			SELECT t.id, t.title, t.artist, t.album, t.duration_seconds, t.tags, pl.played_at
+			  FROM plays pl
+			  JOIN tracks t ON t.id = pl.track_id
+			 ORDER BY pl.played_at DESC, pl.id DESC
+			 LIMIT 1`).Scan(append(dest, &play.PlayedAt)...)
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query now playing: %w", err)
+	}
+	play.Track = t
+	return &play, nil
+}
+
+// scanTrack reads the common track columns, so the list and now-playing queries cannot drift
+// apart in how they map NULL albums and arrays.
+func scanTrack(scan func(dest ...any) error) (radio.Track, error) {
+	var (
+		t     radio.Track
+		album sql.NullString
+		tags  pq.StringArray
+	)
+	if err := scan(&t.ID, &t.Title, &t.Artist, &album, &t.DurationSeconds, &tags); err != nil {
+		return radio.Track{}, err
+	}
+	if album.Valid {
+		t.Album = &album.String
+	}
+	t.Tags = []string(tags)
+	return t, nil
 }
 
 // Migrate applies pending embedded migrations in filename order, each in its own transaction.

@@ -31,28 +31,30 @@ type RuleMatcher interface {
 
 // Proxy routes each request to the legacy or the Go implementation.
 type Proxy struct {
-	rules  RuleMatcher
-	legacy http.Handler
-	log    *slog.Logger
+	rules     RuleMatcher
+	legacy    http.Handler
+	candidate http.Handler
+	log       *slog.Logger
 }
 
-// New builds the facade. legacy is usually the handler returned by NewLegacy.
-func New(rules RuleMatcher, legacy http.Handler, log *slog.Logger) *Proxy {
-	return &Proxy{rules: rules, legacy: legacy, log: log}
+// New builds the facade. legacy is usually the handler returned by NewLegacy; candidate is the
+// in-process Go API that is replacing it.
+func New(rules RuleMatcher, legacy, candidate http.Handler, log *slog.Logger) *Proxy {
+	return &Proxy{rules: rules, legacy: legacy, candidate: candidate, log: log}
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rule := p.rules.Match(r.URL.Path)
 	backend := rule.Backend(ClientKey(r))
 
-	// The Go API does not exist yet, so a "go" decision is still answered by legacy. Routing is
-	// already computed for real so the switch to Go is a one-line change once handlers exist.
-	if backend == routing.BackendGo {
-		backend = routing.BackendLegacy
-	}
-
 	w.Header().Set(httpx.ServedByHeader, string(backend))
 	w.Header().Set(RouteModeHeader, string(rule.Mode))
+
+	if backend == routing.BackendGo {
+		// Same process, plain function call: no network hop, so "go" mode costs nothing extra.
+		p.candidate.ServeHTTP(w, r)
+		return
+	}
 	p.legacy.ServeHTTP(w, r)
 }
 
