@@ -44,6 +44,14 @@ jobs:
       - name: go test (race detector)
         run: go test -race -count=1 ./...
 
+      # Tests run on the newest Go to catch upgrades early, but staticcheck can only read the
+      # export data of the Go releases it was built for (v0.7.0 fails on 1.27 with "export data
+      # version 5 is greater than maximum supported"). It runs on 1.25, like the Dockerfile.
+      - name: Set up Go 1.25 for staticcheck
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.x"
+
       - name: staticcheck
         run: go run "honnef.co/go/tools/cmd/staticcheck@${STATICCHECK_VERSION}" ./...
 
