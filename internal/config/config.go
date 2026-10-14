@@ -26,7 +26,22 @@ type Config struct {
 	ShadowQueue     int
 	DemoInjectBugs  bool
 	LogLevel        slog.Level
+
+	// Web UI: the station whose public stream the player tunes into.
+	StationName       string
+	StreamURL         string
+	StreamURLFallback string // "" disables the fallback
+	HeroImageURL      string // "" means a plain gradient background
 }
+
+// Defaults for the web UI. The demo plays Faith FM Australia's public stream, as the RadioApp
+// pilot does; the browser connects to it directly (its Icecast refuses cloud egress IPs).
+const (
+	DefaultStationName       = "Faith FM Australia"
+	DefaultStreamURL         = "https://stream1.faithfm.com.au/FaithFM.mp3"
+	DefaultStreamURLFallback = "https://stream1.faithfm.com.au/FaithFM.ogg"
+	DefaultHeroImageURL      = "https://cdn.faithfm.com.au/wp-content/uploads/2021/07/23221023/Faith-FM-Hero-Play.jpg"
+)
 
 // Load reads the process environment. All problems are reported together so a misconfigured
 // deploy is fixed in one round trip instead of one crash per variable.
@@ -49,6 +64,11 @@ func load(getenv func(string) string) (Config, error) {
 		ShadowQueue:     l.positiveInt("SHADOW_QUEUE", 100),
 		DemoInjectBugs:  l.boolean("DEMO_INJECT_BUGS", false),
 		LogLevel:        l.logLevel("LOG_LEVEL", slog.LevelInfo),
+
+		StationName:       l.str("STATION_NAME", DefaultStationName),
+		StreamURL:         l.webURL("STREAM_URL", DefaultStreamURL),
+		StreamURLFallback: l.webURL("STREAM_URL_FALLBACK", DefaultStreamURLFallback),
+		HeroImageURL:      l.webURL("HERO_IMAGE_URL", DefaultHeroImageURL),
 	}
 	if err := errors.Join(l.errs...); err != nil {
 		return Config{}, err
@@ -97,6 +117,21 @@ func (l *loader) absURL(key string, secret bool) string {
 		} else {
 			l.fail(key, "must be an absolute URL (scheme://host/...), got %q", v)
 		}
+		return ""
+	}
+	return v
+}
+
+// webURL validates an optional http(s) URL loaded by the browser. "none" switches the feature off
+// explicitly, because an empty variable means "use the default".
+func (l *loader) webURL(key, def string) string {
+	v := l.str(key, def)
+	if v == "none" {
+		return ""
+	}
+	u, err := url.Parse(v)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		l.fail(key, "must be an http(s) URL or \"none\", got %q", v)
 		return ""
 	}
 	return v

@@ -22,6 +22,7 @@ import (
 	"github.com/Zelezim/radio-strangler/internal/routing"
 	"github.com/Zelezim/radio-strangler/internal/shadow"
 	"github.com/Zelezim/radio-strangler/internal/store"
+	"github.com/Zelezim/radio-strangler/internal/web"
 )
 
 const (
@@ -31,6 +32,8 @@ const (
 	// shutdownTimeout must fit inside the platform's grace period before SIGKILL: Render gives
 	// 30s, Docker only 10s by default, so compose needs stop_grace_period of at least 25s.
 	shutdownTimeout = 20 * time.Second
+
+	repoURL = "https://github.com/Zelezim/radio-strangler"
 )
 
 func main() {
@@ -96,7 +99,21 @@ func run(cfg config.Config, log *slog.Logger) error {
 
 	go runRetention(ctx, st, cfg.ShadowRetention, log)
 
+	site, err := web.New(web.Options{
+		StationName:       cfg.StationName,
+		StreamURL:         cfg.StreamURL,
+		StreamURLFallback: cfg.StreamURLFallback,
+		HeroImageURL:      cfg.HeroImageURL,
+		RepoURL:           repoURL,
+	})
+	if err != nil {
+		return err
+	}
+
 	mux := http.NewServeMux()
+	// The showcase UI owns only its exact page paths and /static/; everything else still goes
+	// through the strangler proxy below.
+	site.Register(mux)
 	mux.Handle("GET /metrics", registry)
 	mux.Handle("/admin/", admin.New(st, loader, cfg.AdminToken, log))
 	// Liveness: the process is up. Deliberately independent of the database so a database

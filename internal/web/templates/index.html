@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0b10">
+  <meta name="description" content="Listen to {{.StationName}} live. A portfolio demo of migrating a legacy PHP API to Go with the Strangler Fig pattern.">
+  <title>{{.StationName}} · radio-strangler</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%23ff3b5c'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css?v={{.AssetVersion}}">
+  <script src="/static/app.js?v={{.AssetVersion}}" defer></script>
+</head>
+<body data-hero="{{.HeroImageURL}}">
+
+  <header class="topbar">
+    <a href="/" class="brand" data-link>
+      <span class="logo-dot" aria-hidden="true"></span>
+      <span class="brand-text">RadioStrangler</span>
+    </a>
+    <nav class="nav" aria-label="Main">
+      <a href="/" data-link>Home</a>
+      <a href="/programs" data-link>Programs</a>
+      <a href="/tracks" data-link>Tracks</a>
+    </nav>
+  </header>
+
+  <main class="container" id="main">
+
+    <!-- ============================ Home ============================ -->
+    <section class="page" data-page="/" aria-labelledby="home-title">
+      <div class="hero">
+        <div class="live-indicator"><span class="dot" aria-hidden="true"></span> LIVE NOW</div>
+        <h1 class="hero-title" id="home-title">{{.StationName}}</h1>
+        <p class="hero-tag">Uplifting Christian music, faith-based talk and family-friendly radio — 87.6, 87.8 and 88.0 FM across Australia.</p>
+
+        <div class="hero-actions">
+          <a href="/programs" class="btn-primary" data-link>📻 Browse programs</a>
+          <button class="btn-ghost" type="button" data-trigger="dock-toggle">🔧 Under the hood</button>
+        </div>
+
+        <p class="hint">Tap the play button below to tune in. The player stays with you as you navigate.</p>
+      </div>
+
+      <article class="now-card" aria-live="polite">
+        <header class="section-head">
+          <h2>On the catalog now</h2>
+          <span class="served" data-route="/api/now-playing"></span>
+        </header>
+        <div class="now-body" id="nowPlaying">
+          <div class="eq" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
+          <div class="now-text">
+            <p class="now-title skeleton">Loading…</p>
+            <p class="now-meta muted"></p>
+            <div class="tags"></div>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <!-- ========================== Programs ========================== -->
+    <section class="page" data-page="/programs" hidden aria-labelledby="programs-title">
+      <header class="page-head">
+        <div>
+          <h1 id="programs-title">Programs</h1>
+          <p class="muted">The weekly schedule, read from <code>/api/programs</code>.</p>
+        </div>
+        <span class="served" data-route="/api/programs"></span>
+      </header>
+      <div class="cards" id="programs"><p class="muted">Loading…</p></div>
+    </section>
+
+    <!-- =========================== Tracks =========================== -->
+    <section class="page" data-page="/tracks" hidden aria-labelledby="tracks-title">
+      <header class="page-head">
+        <div>
+          <h1 id="tracks-title">Tracks</h1>
+          <p class="muted">The music library, read from <code>/api/tracks</code>.</p>
+        </div>
+        <span class="served" data-route="/api/tracks"></span>
+      </header>
+      <ol class="track-list" id="tracks"><li class="muted">Loading…</li></ol>
+    </section>
+
+  </main>
+
+  <footer class="footer">
+    <small>
+      © RadioStrangler — streaming from {{.StationName}} ·
+      <a href="{{.RepoURL}}" rel="noopener" target="_blank">source on GitHub</a><br>
+      Unofficial portfolio demo, not affiliated with {{.StationName}}. Audio and hero image belong to the station.
+    </small>
+  </footer>
+
+  <!-- ==========================================================
+       Persistent player + "under the hood" dock. Never re-rendered:
+       navigation only toggles the pages above.
+       ========================================================== -->
+  <aside class="dock" id="dock" data-expanded="false">
+
+    <div class="dock-panel" id="dockPanel" aria-hidden="true" aria-labelledby="hood-title">
+      <header class="dock-panel-head">
+        <h2 id="hood-title">Under the hood</h2>
+        <button class="dock-close" id="dockClose" type="button" aria-label="Close">✕</button>
+      </header>
+
+      <p class="muted small">
+        This page calls the station API through a Go proxy that is migrating it from PHP, one route at a
+        time. Each call shows who answered it.
+      </p>
+
+      <table class="routes">
+        <thead><tr><th>Route</th><th>Mode</th><th>Served by</th><th>Latency</th></tr></thead>
+        <tbody id="routeTable"><tr><td colspan="4" class="muted">No calls yet.</td></tr></tbody>
+      </table>
+
+      <div class="identity">
+        <span class="muted small">Canary identity <code id="clientId"></code></span>
+        <button class="btn-chip" id="newIdentity" type="button" title="Canary routes pick a side per client">↻ New identity</button>
+      </div>
+
+      <h3 class="small-head">Recent calls</h3>
+      <ol class="call-log" id="callLog"></ol>
+
+      <p class="small links">
+        <a href="/metrics" target="_blank">Prometheus metrics →</a>
+        <a href="{{.RepoURL}}" target="_blank" rel="noopener">How it works →</a>
+      </p>
+    </div>
+
+    <div class="dock-bar">
+      <button id="playBtn" class="dock-play" type="button" aria-label="Play / pause">
+        <span class="play-icon" aria-hidden="true">▶</span>
+        <span class="pause-icon" aria-hidden="true">❚❚</span>
+      </button>
+
+      <div class="dock-info">
+        <div class="dock-title">{{.StationName}}</div>
+        <div class="dock-status">
+          <span class="live-dot" aria-hidden="true"></span>
+          <span id="status">Idle</span>
+        </div>
+      </div>
+
+      <label class="dock-vol">
+        <span aria-hidden="true">🔊</span>
+        <input id="vol" type="range" min="0" max="1" step="0.01" value="0.8" aria-label="Volume">
+      </label>
+
+      <button class="dock-toggle" id="dockToggle" type="button"
+              aria-controls="dockPanel" aria-expanded="false" title="Under the hood">🔧</button>
+    </div>
+
+    <!-- The browser connects straight to the station's Icecast: it refuses cloud egress IPs, so
+         relaying through the server is not an option. MP3 first, OGG as fallback. -->
+    <audio id="radio" preload="none" data-src-mp3="{{.StreamURL}}" data-src-ogg="{{.StreamURLFallback}}">
+      <source src="{{.StreamURL}}" type="audio/mpeg">
+      {{- if .StreamURLFallback}}
+      <source src="{{.StreamURLFallback}}" type="audio/ogg">
+      {{- end}}
+    </audio>
+  </aside>
+</body>
+</html>

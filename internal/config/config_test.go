@@ -64,6 +64,47 @@ func TestLoadReportsAllErrorsAtOnce(t *testing.T) {
 	}
 }
 
+func TestWebDefaultsAndOverrides(t *testing.T) {
+	base := map[string]string{
+		"DATABASE_URL": "postgresql://user:pw@db.example.com/postgres",
+		"LEGACY_URL":   "http://localhost:8081",
+	}
+	cfg, err := load(env(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StationName != DefaultStationName || cfg.StreamURL != DefaultStreamURL ||
+		cfg.StreamURLFallback != DefaultStreamURLFallback || cfg.HeroImageURL != DefaultHeroImageURL {
+		t.Errorf("unexpected web defaults: %+v", cfg)
+	}
+
+	base["STATION_NAME"] = "Test FM"
+	base["STREAM_URL"] = "https://radio.example/live.mp3"
+	base["STREAM_URL_FALLBACK"] = "none"
+	base["HERO_IMAGE_URL"] = "none"
+	cfg, err = load(env(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StationName != "Test FM" || cfg.StreamURL != "https://radio.example/live.mp3" ||
+		cfg.StreamURLFallback != "" || cfg.HeroImageURL != "" {
+		t.Errorf("overrides not applied: %+v", cfg)
+	}
+}
+
+func TestWebURLsMustBeHTTP(t *testing.T) {
+	for _, bad := range []string{"javascript:alert(1)", "ftp://radio.example/x", "/relative.mp3", "https://"} {
+		_, err := load(env(map[string]string{
+			"DATABASE_URL": "postgresql://user:pw@db.example.com/postgres",
+			"LEGACY_URL":   "http://localhost:8081",
+			"STREAM_URL":   bad,
+		}))
+		if err == nil || !strings.Contains(err.Error(), "STREAM_URL") {
+			t.Errorf("STREAM_URL=%q: err = %v, want a STREAM_URL error", bad, err)
+		}
+	}
+}
+
 func TestLoadNeverLeaksDatabasePassword(t *testing.T) {
 	// A space in the host makes url.Parse fail; its error would normally quote the whole URL.
 	_, err := load(env(map[string]string{

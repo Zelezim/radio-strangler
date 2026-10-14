@@ -39,6 +39,21 @@ flowchart LR
 Every request is matched against a **route rule** stored in Postgres (reloaded every 5 seconds, or
 immediately after an admin change) and sent to the backend its mode selects.
 
+## Showcase UI
+
+Open the root URL (`http://localhost:8080` locally) for a radio player in the style of the RadioApp
+pilot: a live stream that keeps playing while you browse **Programs** and **Tracks**. Those pages are
+ordinary clients of the station API, called through the proxy, and every section shows which
+backend answered it (`served by legacy · shadow · 90 ms`). The 🔧 **Under the hood** panel in the
+player dock lists each route's mode, latency and request id, and *New identity* switches the canary
+client id so you can land on the other side of a canary split.
+
+When a route is served by Go with the demo bug enabled, the tracks page shows the broken contract
+(`⚠ tags: null`) instead of crashing like a naive `tags.map()` client would.
+
+> The player streams Faith FM Australia's public feed, as the pilot does. This is an unofficial
+> portfolio demo, not affiliated with the station; station, stream and hero image are configurable.
+
 ## Route modes
 
 | Mode     | Who serves the client | What happens                                                                                       |
@@ -63,9 +78,10 @@ docker compose up -d --build   # or: make up
 ./scripts/smoke.sh             # or: make smoke
 ```
 
-This starts Postgres, the legacy PHP API (`:8081`) and the proxy (`:8080`) locally; it never talks
-to Supabase. The smoke test walks through every stage (pass-through, shadow comparison, admin auth,
-a live switch to Go with a contract diff, and the rollback) and ends with `✓ smoke test passed`.
+This starts Postgres, the legacy PHP API (`:8081`) and the proxy with the showcase UI (`:8080`, open it
+in a browser) locally; it never talks to Supabase. The smoke test walks through every stage
+(pass-through, shadow comparison, admin auth, a live switch to Go with a contract diff, the rollback
+and the showcase UI) and ends with `✓ smoke test passed`.
 
 The admin token defaults to `dev-admin-token`. Compose also reads a `.env` file in the project
 directory if you have one, and `make smoke` resolves the token the same way. Port 8080 taken? Use
@@ -194,6 +210,14 @@ Public operational endpoints:
 - **Built for the free plan.** One binary for proxy and Go API (one Render service instead of two), a
   small connection pool, generous legacy and connect timeouts for cold starts, retention of shadow
   data (7 days by default) and a keepalive workflow.
+- **The UI is just another API client.** It is new code, so Go serves it directly (only `/`,
+  `/programs`, `/tracks` and `/static/`; every other path still reaches the proxy), but its data
+  comes through the proxy like any client's. Navigation uses `history.pushState`, so the `<audio>`
+  element is never reloaded. A strict Content-Security-Policy only allows the configured stream and
+  image hosts, API data is inserted with `textContent` only, and assets are linked as
+  `?v=<content hash>` so they can be cached for a year yet never go stale after a deploy. The
+  browser connects to the station's Icecast directly: it refuses cloud egress IPs, so relaying the
+  stream through Render is not an option.
 - **Minimal dependencies.** Standard library plus `github.com/lib/pq`. No framework, no ORM; the
   Prometheus exposition format is written by hand rather than pulling in the client library.
 
@@ -236,6 +260,10 @@ Public operational endpoints:
 | `SHADOW_RETENTION` | `168h` | Age after which shadow comparisons are purged (hourly). |
 | `DEMO_INJECT_BUGS` | `false` | Demo only: Go returns `null` instead of `[]` for empty tags. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
+| `STATION_NAME` | `Faith FM Australia` | Station shown by the showcase UI. |
+| `STREAM_URL` | Faith FM MP3 stream | Live stream the player tunes into (http/https). |
+| `STREAM_URL_FALLBACK` | Faith FM OGG stream | Alternate format if the first stalls; `none` disables it. |
+| `HERO_IMAGE_URL` | Faith FM hero image | Page background image; `none` leaves a plain gradient. |
 
 Configuration errors are all reported at once at startup, and `DATABASE_URL` is never echoed in them.
 docker compose additionally accepts `APP_PORT` and `LEGACY_PORT` for the published ports.
@@ -256,6 +284,7 @@ internal/
   routing/           modes, rules, canary hashing, lock-free rule table and loader
   shadow/            bounded async replay of requests against Go
   store/             Postgres access and embedded migrations
+  web/               showcase UI: live player, pages over the API, "under the hood" panel
 legacy-php/          the legacy API (deliberately old-style procedural PHP) and its Dockerfile
 scripts/smoke.sh     end-to-end test against any running deployment
 ```
@@ -276,8 +305,8 @@ runs the smoke test against it.
 - **Dry-run for writes:** shadow non-GET routes by executing the Go side inside a transaction that is
   always rolled back.
 - **Sampling:** shadow only a percentage of requests on high-traffic routes.
-- **Dashboard:** a small page over `/admin/stats` and `/admin/comparisons` to follow each route's
-  migration.
+- **Migration dashboard:** the showcase already shows who answered each call; an authenticated page
+  over `/admin/stats` and `/admin/comparisons` would show match rates and diffs over time.
 - **OpenTelemetry:** traces spanning proxy, legacy call and shadow replay, correlated by request id.
 
 ## License

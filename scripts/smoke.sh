@@ -150,4 +150,14 @@ admin -X PUT -d '{"mode":"legacy"}' "$BASE_URL/admin/routes/api/programs" | jq -
 wait_for_backend /api/programs legacy
 programs_changed=false
 
+step "8. showcase UI is served with its versioned assets"
+fetch / "$tmp/ui"
+[[ "$(header "$tmp/ui.headers" Content-Type)" == text/html* ]] || fail "/ is not served as HTML"
+grep -q '<audio id="radio"' "$tmp/ui.body" || fail "/ does not contain the player"
+[[ -n "$(header "$tmp/ui.headers" Content-Security-Policy)" ]] || fail "/ is missing its Content-Security-Policy"
+asset="$(grep -oE '/static/app\.js\?v=[0-9a-f]+' "$tmp/ui.body" | head -n1)"
+[[ -n "$asset" ]] || fail "/ does not link a versioned app.js"
+code="$(curl -sS -o /dev/null -w '%{http_code}' "$BASE_URL$asset")"
+[[ "$code" == 200 ]] || fail "$asset returned $code"
+
 echo "✓ smoke test passed"
