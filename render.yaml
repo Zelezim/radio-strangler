@@ -7,12 +7,17 @@
 #
 # Values marked sync: false are secrets or depend on the deploy; Render asks for them on the
 # first deploy and they are never stored in this public repository.
+#
+# region: virginia puts both services next to the Supabase database (AWS us-east-1). The legacy
+# PHP API opens a new TLS connection per request, so every cross-country round trip would add up;
+# and Render cannot move a service to another region after it is created.
 
 services:
   - type: web
     name: radio-strangler
     runtime: docker
     plan: free
+    region: virginia
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /healthz
@@ -30,11 +35,16 @@ services:
         value: "true"
       - key: LOG_LEVEL
         value: info
+      # Both services sleep on the free plan: the first request may wait for this one to wake
+      # and then for radio-legacy-php to wake too, each about a minute.
+      - key: LEGACY_TIMEOUT
+        value: 90s
 
   - type: web
     name: radio-legacy-php
     runtime: docker
     plan: free
+    region: virginia
     dockerfilePath: ./legacy-php/Dockerfile
     dockerContext: ./legacy-php
     healthCheckPath: /healthz
