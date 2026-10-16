@@ -245,7 +245,9 @@ func NewLegacy(target *url.URL, timeout time.Duration, log *slog.Logger) *httput
 			pr.Out.Header["X-Forwarded-For"] = pr.In.Header["X-Forwarded-For"]
 			pr.SetXForwarded()
 		},
-		Transport: transport,
+		// Retries ride out a sleeping legacy service for up to `timeout`; each attempt is itself
+		// bounded by ResponseHeaderTimeout, so a request can take up to twice that in total.
+		Transport: newRetryTransport(transport, timeout, log),
 		ErrorLog:  slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			level := slog.LevelWarn

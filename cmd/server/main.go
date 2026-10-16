@@ -140,8 +140,9 @@ func run(cfg config.Config, log *slog.Logger) error {
 		Handler:           httpx.Chain(mux, httpx.RequestID, httpx.AccessLog(log), httpx.Recover(log)),
 		ReadHeaderTimeout: 5 * time.Second, // slowloris protection
 		ReadTimeout:       30 * time.Second,
-		// Must outlast the legacy timeout, or a slow-but-successful legacy answer would be cut off.
-		WriteTimeout: cfg.LegacyTimeout + 15*time.Second,
+		// Must outlast the worst legacy call, or a slow-but-successful answer would be cut off: up
+		// to LegacyTimeout of cold-start retries plus one attempt bounded by LegacyTimeout.
+		WriteTimeout: 2*cfg.LegacyTimeout + 15*time.Second,
 		IdleTimeout:  120 * time.Second,
 		ErrorLog:     slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}
