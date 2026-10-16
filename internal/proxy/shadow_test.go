@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"compress/gzip"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -38,12 +39,20 @@ type shadowEnv struct {
 
 func newShadowEnv(t *testing.T, rules []routing.Rule, legacyBody string, candidate http.Handler) *shadowEnv {
 	t.Helper()
+	return newShadowEnvWith(t, rules, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(legacyBody))
+	}), candidate)
+}
+
+// newShadowEnvWith takes the whole fake PHP handler, for tests about what legacy sends back.
+func newShadowEnvWith(t *testing.T, rules []routing.Rule, legacy, candidate http.Handler) *shadowEnv {
+	t.Helper()
 	env := &shadowEnv{results: make(chanRecorder, 10)}
 
 	php := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		env.legacyHits.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(legacyBody))
+		legacy.ServeHTTP(w, r)
 	}))
 	t.Cleanup(php.Close)
 	target, _ := url.Parse(php.URL)
@@ -196,6 +205,66 @@ func TestClientDisconnectDoesNotCancelComparison(t *testing.T) {
 	}
 	if id, _ := requestID.Load().(string); id != "client-req-1" {
 		t.Errorf("shadow request id = %q, want client-req-1", id)
+	}
+}
+
+// cdnLegacy behaves like legacy behind Cloudflare: brotli when the request allows it, gzip when
+// only gzip is allowed, plain JSON otherwise.
+func cdnLegacy(body string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		ae := r.Header.Get("Accept-Encoding")
+		switch {
+		case strings.Contains(ae, "br"):
+			w.Header().Set("Content-Encoding", "br")
+			_, _ = w.Write([]byte("P\x0bbrotli-bytes-the-shadow-cannot-decode"))
+		case strings.Contains(ae, "gzip"):
+			w.Header().Set("Content-Encoding", "gzip")
+			gz := gzip.NewWriter(w)
+			_, _ = gz.Write([]byte(body))
+			_ = gz.Close()
+		default:
+			_, _ = w.Write([]byte(body))
+		}
+	})
+}
+
+func TestShadowComparesDecodedLegacyBodyBehindACDN(t *testing.T) {
+	body := `{"data":[{"id":3,"tags":[]}]}`
+	env := newShadowEnvWith(t, shadowTracks, cdnLegacy(body), goBody(body))
+
+	// What Chrome sends. Forwarded as is, the CDN would answer in brotli.
+	req := httptest.NewRequest(http.MethodGet, "/api/tracks", nil)
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+	rec := httptest.NewRecorder()
+	env.handler.ServeHTTP(rec, req)
+
+	if rec.Body.String() != body || rec.Header().Get("Content-Encoding") != "" {
+		t.Errorf("client got %q (Content-Encoding %q), want the decoded legacy body",
+			rec.Body.String(), rec.Header().Get("Content-Encoding"))
+	}
+	results := env.finish(t)
+	if len(results) != 1 || !results[0].Match {
+		t.Errorf("results = %+v, want one match", results)
+	}
+}
+
+func TestShadowSkipsEncodedLegacyBody(t *testing.T) {
+	// A backend that compresses no matter what was asked.
+	stubborn := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "br")
+		_, _ = w.Write([]byte("P\x0bbrotli"))
+	})
+	env := newShadowEnvWith(t, shadowTracks, stubborn, goBody(`{}`))
+
+	rec := env.do(http.MethodGet, "/api/tracks")
+	results := env.finish(t)
+
+	if rec.Body.String() != "P\x0bbrotli" {
+		t.Errorf("client body = %q, want it passed through untouched", rec.Body.String())
+	}
+	if len(results) != 0 || env.candidateHits.Load() != 0 {
+		t.Errorf("results=%d candidate=%d: an encoded body must not be compared", len(results), env.candidateHits.Load())
 	}
 }
 

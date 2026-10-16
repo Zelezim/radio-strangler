@@ -107,6 +107,13 @@ func (p *Proxy) serveShadow(w http.ResponseWriter, r *http.Request, rule routing
 	replay := r.Clone(context.WithoutCancel(r.Context()))
 	replay.Body = http.NoBody
 
+	// The comparison needs the legacy body as plain bytes. Forwarding the client's
+	// Accept-Encoding lets a CDN in front of legacy answer in brotli, which the shadow cannot
+	// decode (found in production behind Cloudflare). Without it, Go's transport negotiates gzip
+	// itself and decompresses transparently; the platform edge in front of this proxy still
+	// compresses the response for the client.
+	r.Header.Del("Accept-Encoding")
+
 	cw := &captureWriter{ResponseWriter: w, limit: shadow.MaxBody}
 	start := time.Now()
 	p.legacy.ServeHTTP(cw, r)
@@ -114,6 +121,12 @@ func (p *Proxy) serveShadow(w http.ResponseWriter, r *http.Request, rule routing
 
 	if cw.truncated {
 		p.log.Debug("shadow skipped: legacy body over limit", "route", rule.Route, "path", r.URL.Path)
+		return
+	}
+	// Belt and braces for backends that compress regardless of what was asked: comparing encoded
+	// bytes with JSON would only ever produce false mismatches.
+	if enc := cw.Header().Get("Content-Encoding"); enc != "" && enc != "identity" {
+		p.log.Debug("shadow skipped: legacy body is encoded", "route", rule.Route, "encoding", enc)
 		return
 	}
 	p.shadow.Submit(shadow.Job{
